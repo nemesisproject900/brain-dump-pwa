@@ -1,0 +1,1 @@
+{"functions":{"api/entries.rs":{"runtime":"vercel-rust@4.0.8"}},"rewrites":[{"source":"/api/entries","destination":"/api/entries"}]}
