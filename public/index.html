@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  
+  <!-- PWA iOS Safari Settings -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BrainDump">
+  <link rel="apple-touch-icon" href="https://via.placeholder.com/180/0f172a/38bdf8?text=BD">
+  <link rel="manifest" href="/manifest.json">
+  
+  <title>Brain Dump & Focus</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      background-color: #0f172a;
+      color: #f1f5f9;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .fade-out {
+      opacity: 0;
+      transform: scale(0.95);
+      transition: all 0.4s ease;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col font-sans antialiased selection:bg-sky-500/30">
+
+  <!-- Header -->
+  <header class="px-5 py-4 flex justify-between items-center border-b border-slate-800/80 sticky top-0 bg-slate-900/90 backdrop-blur-md z-10">
+    <div>
+      <h1 class="text-lg font-semibold tracking-tight text-slate-100">Brain Dump</h1>
+      <p id="syncStatus" class="text-xs text-slate-400">Menghubungkan ke Cloud...</p>
+    </div>
+    <button onclick="toggleTimer()" id="timerBtn" class="px-3.5 py-1.5 rounded-full text-xs font-medium bg-slate-800 text-sky-400 border border-slate-700 active:scale-95 transition">
+      05:00
+    </button>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 px-5 py-5 space-y-6 max-w-lg mx-auto w-full">
+    
+    <!-- Input Area -->
+    <div class="space-y-3">
+      <textarea id="dumpInput" rows="4" placeholder="Tumpahkan semua yang bikin kepala berat saat ini... (Satu baris satu pikiran)"
+        class="w-full bg-slate-800/50 border border-slate-700/80 rounded-2xl p-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500/70 resize-none leading-relaxed"></textarea>
+      
+      <div class="grid grid-cols-2 gap-2.5">
+        <button onclick="addEntry('controllable')" class="py-2.5 px-3 bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs font-medium active:scale-95 transition">
+          + Bisa Dikontrol
+        </button>
+        <button onclick="addEntry('uncontrollable')" class="py-2.5 px-3 bg-amber-600/20 border border-amber-500/40 text-amber-300 rounded-xl text-xs font-medium active:scale-95 transition">
+          + Di Luar Kontrol
+        </button>
+      </div>
+    </div>
+
+    <!-- Kolom 1: Bisa Dikontrol -->
+    <section class="space-y-2.5">
+      <div class="flex justify-between items-center">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-emerald-400">Bisa Dikontrol (Fokus Hari Ini)</h2>
+        <span id="countControllable" class="text-xs text-slate-500">0</span>
+      </div>
+      <div id="controllableList" class="space-y-2"></div>
+    </section>
+
+    <!-- Kolom 2: Di Luar Kontrol -->
+    <section class="space-y-2.5 pt-2 border-t border-slate-800/80">
+      <div class="flex justify-between items-center">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-amber-400">Di Luar Kontrol (Cukup Didoakan)</h2>
+        <span id="countUncontrollable" class="text-xs text-slate-500">0</span>
+      </div>
+      <div id="uncontrollableList" class="space-y-2"></div>
+    </section>
+
+  </main>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
+    let entries = JSON.parse(localStorage.getItem('bd_entries') || '[]');
+    const API_ENDPOINT = '/api/entries';
+
+    // Timer Logic
+    let timerSeconds = 300;
+    let timerInterval = null;
+    function toggleTimer() {
+      const btn = document.getElementById('timerBtn');
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+        btn.classList.remove('bg-sky-900', 'text-sky-200');
+      } else {
+        btn.classList.add('bg-sky-900', 'text-sky-200');
+        timerInterval = setInterval(() => {
+          if (timerSeconds <= 0) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            timerSeconds = 300;
+            btn.textContent = "Selesai!";
+            return;
+          }
+          timerSeconds--;
+          const m = String(Math.floor(timerSeconds / 60)).padStart(2, '0');
+          const s = String(timerSeconds % 60).padStart(2, '0');
+          btn.textContent = `${m}:${s}`;
+        }, 1000);
+      }
+    }
+
+    async function syncWithBackend() {
+      const statusEl = document.getElementById('syncStatus');
+      try {
+        const res = await fetch(API_ENDPOINT);
+        if (res.ok) {
+          entries = await res.json();
+          localStorage.setItem('bd_entries', JSON.stringify(entries));
+          statusEl.textContent = 'Terhubung: Turso Cloud';
+          statusEl.className = 'text-xs text-emerald-400';
+        } else {
+          throw new Error('Server error');
+        }
+      } catch (e) {
+        statusEl.textContent = 'Mode Offline (Tersimpan di iPhone)';
+        statusEl.className = 'text-xs text-amber-400';
+      }
+      render();
+    }
+
+    async function addEntry(control_status) {
+      const input = document.getElementById('dumpInput');
+      const rawText = input.value.trim();
+      if (!rawText) return;
+
+      const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+      input.value = '';
+
+      for (const content of lines) {
+        const tempItem = {
+          id: Date.now() + Math.random(),
+          content,
+          control_status,
+          is_completed: false
+        };
+        entries.unshift(tempItem);
+        localStorage.setItem('bd_entries', JSON.stringify(entries));
+        render();
+
+        try {
+          const res = await fetch(API_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content, control_status })
+          });
+          if (res.ok) await syncWithBackend();
+        } catch (e) {}
+      }
+    }
+
+    async function toggleComplete(id) {
+      const item = entries.find(e => e.id === id);
+      if (!item) return;
+      item.is_completed = !item.is_completed;
+      localStorage.setItem('bd_entries', JSON.stringify(entries));
+      render();
+
+      try {
+        await fetch(`${API_ENDPOINT}?id=${id}`, { method: 'PATCH' });
+      } catch (e) {}
+    }
+
+    async function releaseEntry(id, elementId) {
+      const el = document.getElementById(elementId);
+      if (el) el.classList.add('fade-out');
+      
+      setTimeout(async () => {
+        entries = entries.filter(e => e.id !== id);
+        localStorage.setItem('bd_entries', JSON.stringify(entries));
+        render();
+
+        try {
+          await fetch(`${API_ENDPOINT}?id=${id}`, { method: 'DELETE' });
+        } catch (e) {}
+      }, 350);
+    }
+
+    function render() {
+      const cList = document.getElementById('controllableList');
+      const uList = document.getElementById('uncontrollableList');
+      cList.innerHTML = '';
+      uList.innerHTML = '';
+
+      const controllable = entries.filter(e => e.control_status === 'controllable');
+      const uncontrollable = entries.filter(e => e.control_status === 'uncontrollable');
+
+      document.getElementById('countControllable').textContent = controllable.length;
+      document.getElementById('countUncontrollable').textContent = uncontrollable.length;
+
+      controllable.forEach(item => {
+        const div = document.createElement('div');
+        div.id = `item-${item.id}`;
+        div.className = 'flex items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/60';
+        div.innerHTML = `
+          <button onclick="toggleComplete(${item.id})" class="flex items-center gap-3 text-left flex-1">
+            <span class="w-5 h-5 rounded-md border flex items-center justify-center text-xs ${item.is_completed ? 'bg-emerald-500 border-emerald-500 text-slate-950 font-bold' : 'border-slate-500'}">
+              ${item.is_completed ? '✓' : ''}
+            </span>
+            <span class="text-sm ${item.is_completed ? 'line-through text-slate-500' : 'text-slate-200'}">${escapeHtml(item.content)}</span>
+          </button>
+          <button onclick="releaseEntry(${item.id}, 'item-${item.id}')" class="text-xs text-slate-500 hover:text-rose-400 px-2 py-1">Hapus</button>
+        `;
+        cList.appendChild(div);
+      });
+
+      uncontrollable.forEach(item => {
+        const div = document.createElement('div');
+        div.id = `item-${item.id}`;
+        div.className = 'flex items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-800/30 border border-slate-800';
+        div.innerHTML = `
+          <span class="text-sm text-slate-300 flex-1 leading-relaxed">${escapeHtml(item.content)}</span>
+          <button onclick="releaseEntry(${item.id}, 'item-${item.id}')" class="px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs active:scale-95 transition">
+            Ikhlaskan
+          </button>
+        `;
+        uList.appendChild(div);
+      });
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+
+    syncWithBackend();
+  </script>
+</body>
+</html>
