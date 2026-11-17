@@ -24,23 +24,52 @@ async fn main() -> Result<(), Error> {
     run(handler).await
 }
 
+fn json_error(status: StatusCode, msg: &str) -> Result<Response<Body>, Error> {
+    let body = serde_json::json!({ "error": msg }).to_string();
+    Ok(Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Body::Text(body))?)
+}
+
 pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
-    let db_url = env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL belum diatur");
-    let auth_token = env::var("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN belum diatur");
+    let raw_url = match env::var("TURSO_DATABASE_URL") {
+        Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
+        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "TURSO_DATABASE_URL belum diatur di Vercel"),
+    };
 
-    let db = Builder::new_remote(db_url, auth_token).build().await?;
-    let conn = db.connect()?;
+    let auth_token = match env::var("TURSO_AUTH_TOKEN") {
+        Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
+        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "TURSO_AUTH_TOKEN belum diatur di Vercel"),
+    };
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT NOT NULL,
-            control_status TEXT NOT NULL,
-            is_completed BOOLEAN NOT NULL DEFAULT 0
-        )",
-        (),
-    )
-    .await?;
+    // Otomatis konversi libsql:// ke https:// agar kompatibel dengan HTTP/Hrana client
+    let db_url = raw_url.replace("libsql://", "https://");
+
+    let db = match Builder::new_remote(db_url, auth_token).build().await {
+        Ok(d) => d,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Gagal build DB: {}", e)),
+    };
+
+    let conn = match db.connect() {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Gagal connect DB: {}", e)),
+    };
+
+    if let Err(e) = conn
+        .execute(
+            "CREATE TABLE IF NOT EXISTS entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                control_status TEXT NOT NULL,
+                is_completed BOOLEAN NOT NULL DEFAULT 0
+            )",
+            (),
+        )
+        .await
+    {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Gagal buat tabel: {}", e));
+    }
 
     let parsed_url = Url::parse(&req.uri().to_string())
         .unwrap_or_else(|_| Url::parse("http://localhost/api/entries").unwrap());
@@ -48,19 +77,24 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
 
     match req.method().as_str() {
         "GET" => {
-            let mut rows = conn
+            let mut rows = match conn
                 .query(
                     "SELECT id, content, control_status, is_completed FROM entries ORDER BY id DESC",
                     (),
                 )
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Gagal query: {}", e)),
+            };
+
             let mut entries = Vec::new();
-            while let Some(row) = rows.next().await? {
+            while let Ok(Some(row)) = rows.next().await {
                 entries.push(Entry {
-                    id: row.get::<i64>(0)?,
-                    content: row.get::<String>(1)?,
-                    control_status: row.get::<String>(2)?,
-                    is_completed: row.get::<i64>(3)? != 0,
+                    id: row.get::<i64>(0).unwrap_or(0),
+                    content: row.get::<String>(1).unwrap_or_default(),
+                    control_status: row.get::<String>(2).unwrap_or_default(),
+                    is_completed: row.get::<i64>(3).unwrap_or(0) != 0,
                 });
             }
             let json = serde_json::to_string(&entries)?;
@@ -79,6 +113,7 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
             .await?;
             Ok(Response::builder()
                 .status(StatusCode::CREATED)
+                .header("Content-Type", "application/json")
                 .body(Body::Text("{\"status\":\"created\"}".to_string()))?)
         }
         "PATCH" => {
@@ -93,6 +128,7 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
             }
             Ok(Response::builder()
                 .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
                 .body(Body::Text("{\"status\":\"updated\"}".to_string()))?)
         }
         "DELETE" => {
@@ -107,10 +143,9 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
             }
             Ok(Response::builder()
                 .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
                 .body(Body::Text("{\"status\":\"deleted\"}".to_string()))?)
         }
-        _ => Ok(Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::Text("Method not allowed".to_string()))?),
+        _ => json_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"),
     }
 }
